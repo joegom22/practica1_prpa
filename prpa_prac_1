@@ -1,0 +1,195 @@
+from multiprocessing import Process
+from multiprocessing import BoundedSemaphore, Semaphore, Lock
+from multiprocessing import current_process
+from multiprocessing import Value, Array
+from time import sleep
+from random import random, randint
+
+
+
+N = 15 #Veces que produce cada productor antes de parar
+K = 10 #Capacidad de los almacenes de los productores
+NPROD = 3 #Número de Productores
+
+def delay(factor = 3):
+    sleep(random()/factor)
+
+
+def add_data(storage, index, data, mutex):
+    """
+    Añade a una lista un dato en una posición determinada.
+
+    Args:
+        storage (array): Lista donde se guarda el dato
+        index (int): Posicion en la que guardamos el dato
+        data (int): Dato que añadimos
+        mutex (Lock): Lock que nos permite asegurarnos de que no se añaden a la vez dos elementos
+    """
+    mutex.acquire()
+    try:
+        storage[index.value] = data
+        delay(6)
+        index.value = index.value + 1
+    finally:
+        mutex.release()
+
+
+def get_data(storage, index, mutex):
+    """
+    Obtiene de una lista el dato en primera posición.
+
+    Args:
+        storage (array): Lista donde se guarda el dato
+        index (int): Posicion en la que se encuentra el último dato de la lista
+        mutex (Lock): Lock que nos permite asegurarnos de que no se quitan a la vez dos elementos
+    """
+    mutex.acquire()
+    try:
+        data = storage[0]
+        index.value = index.value - 1
+        delay()
+        for i in range(index.value):
+            storage[i] = storage[i + 1]
+        storage[index.value] = -2
+    finally:
+        mutex.release()
+    return data
+
+
+def producer(storage, index, empty, non_empty, mutex):
+    """
+    Produce elementos positivos aleatorios de forma creciente y los almacena en una lista.
+
+    Args:
+        storage (array): Lista donde almacena los datos producidos
+        index (int): Posicion en la que guardamos el dato
+        empty (BoundedSemaphore): Semáforo con componente entera incial k que controla el número de huecos vacíos de storage
+        non_empty (Semaphore): Semáforo de componente entera inicial 0 que controla que storage esté o no vacío
+        mutex (Lock): Lock que nos permite asegurarnos de que no se añadan o quiten a la vez dos elementos
+    """
+    aux=randint(0,100)
+    for v in range(N):
+        print (f"producer {current_process().name} produciendo")
+        delay(6)
+        empty.acquire()
+        add_data(storage, index, aux, mutex)
+        aux=randint(aux+1,2*aux)
+        non_empty.release()
+        print (f"producer {current_process().name} almacenado {v}")
+    empty.acquire()
+    add_data(storage, index, -1, mutex)
+    non_empty.release()
+    print (f"producer {current_process().name} ha acabado")
+
+
+def merge(storage, index, sem_list, almacen):
+    v=0
+    finished = False
+    while (v<100) and (finished==False):
+        for j in range(NPROD):
+            sem_list[j][0].acquire()
+            sem_list[j][0].release()
+        print (f"consumer {current_process().name} desalmacenando")
+        minvalue=storage[0][0]
+        minindex=0
+        j=0
+        while (minvalue==-1) and j<NPROD:
+            minvalue=storage[j][0]
+            minindex=j
+            j+=1
+        if minvalue == -1:
+            finished = True
+        else:
+            for j in range(minindex, NPROD):
+                if ((storage[j][0]<minvalue) and (storage[j][0]!=-1)):
+                    minvalue=storage[j][0]
+                    minindex=j
+            sem_list[minindex][0].acquire()
+            dato =get_data(storage[minindex], index[minindex], sem_list[minindex][2])
+            sem_list[minindex][1].release()
+            print (f"consumer {current_process().name} consumiendo {dato}")
+            delay()
+            almacen[v] = dato
+        v+=1
+    texto = f"Almacen final del merge ["
+    for i in range(NPROD*N):
+        if i!=NPROD*N-1:
+            texto+=str((almacen[i])) + ", "
+        else:
+            texto+=str((almacen[i]))
+    print(texto + "]")
+        
+
+def main():
+
+    """
+    Creamos una lista de listas compartidas, una por cada productor, donde irán almacenando sus valores.
+    Además, mostramos el estado inicial de estos almacenes por pantalla.
+    """
+
+    storage_tot = []
+    for j in range(NPROD):
+        storage = Array('i', K)
+        storage_tot.append(storage)
+    for i in range(NPROD):
+        texto = f"almacen inicial {i} ["
+        for j in range(K):
+            if j!=K-1:
+    	        texto+=str((storage_tot[i][j])) + ", "
+            else:
+                texto+=str((storage_tot[i][j]))
+        print(texto + "]")
+
+    """
+    Creamos una lista de valores compartidos, una por cada productor, donde cada productor contabiliza la posición donde debe añadir un nuevo dato.
+    """
+
+    indices=[]
+    for i in range(NPROD):
+    	index = Value('i', 0)
+    	indices.append(index)
+    for i in range(NPROD):
+        for j in range(K):
+            storage_tot[i][j] = -2
+
+    """
+    Creamos una lista de listas con 3 semáforos cada una, una lista por cada productor, donde cada productor controla los semáforos de su lista correspondiente y el merge controla todos.
+    """
+
+    semaphore_list = []
+    for j in range(NPROD):   
+        non_empty = Semaphore(0)
+        empty = BoundedSemaphore(K)
+        mutex = Lock()
+        lista = [non_empty, empty, mutex]
+        semaphore_list.append(lista)
+
+    """
+	Creamos una lista para que el merge vaya almacenando en ella los valores.
+    """           
+	
+    merge_storage = Array('i', NPROD * N)
+    
+    """
+    Incializamos los productores y el merge para que se ejecuten a la vez.
+    """
+    
+    prodlst = [ Process(target=producer,
+                        name=f'prod_{i}',
+                        args=(storage_tot[i], indices[i], semaphore_list[i][1], semaphore_list[i][0], semaphore_list[i][2]))
+                for i in range(NPROD) ]
+
+    conslst = [ Process(target=merge,
+                      name="merge",
+                      args=(storage_tot, indices, semaphore_list, merge_storage))
+                ]
+
+    for p in prodlst + conslst:
+        p.start()
+
+    for p in prodlst + conslst:
+        p.join()
+
+
+if __name__ == '__main__':
+    main()
